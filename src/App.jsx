@@ -10,22 +10,13 @@ const firebaseConfig = {
   storageBucket: "guardianshield-e625e.firebasestorage.app",
   messagingSenderId: "964078074876",
   appId: "1:964078074876:web:3eb9b8ec93ed71d26c5079",
-  measurementId: "G-NCF5LX05J0",
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 
-// ── Constants ────────────────────────────────────────────────────
-const DEFAULT_APPS = [
-  { id: "youtube",   name: "YouTube",     icon: "▶",  color: "#FF0000" },
-  { id: "freefire",  name: "Free Fire",   icon: "🔥", color: "#FF6B00" },
-  { id: "pubg",      name: "BGMI / PUBG", icon: "🎯", color: "#F5A623" },
-  { id: "instagram", name: "Instagram",   icon: "📸", color: "#C13584" },
-  { id: "snapchat",  name: "Snapchat",    icon: "👻", color: "#FFFC00" },
-];
-
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
 const defaultSchedule = () => ({
   enabled: false,
   days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
@@ -35,11 +26,12 @@ const defaultSchedule = () => ({
 // ── Status Pill ──────────────────────────────────────────────────
 function StatusPill({ status }) {
   const map = {
-    loading:   { color: "#facc15", text: "⏳ Connecting…" },
-    connected: { color: "#4ade80", text: "🔥 Firebase Connected" },
-    saving:    { color: "#60a5fa", text: "💾 Saving…" },
-    saved:     { color: "#4ade80", text: "✓ Saved!" },
-    error:     { color: "#f87171", text: "⚠ Firebase Error" },
+    loading:      { color: "#facc15", text: "⏳ Connecting…" },
+    connected:    { color: "#4ade80", text: "🔥 Firebase Connected" },
+    saving:       { color: "#60a5fa", text: "💾 Saving…" },
+    saved:        { color: "#4ade80", text: "✓ Saved!" },
+    error:        { color: "#f87171", text: "⚠ Firebase Error" },
+    scanning:     { color: "#fb923c", text: "📱 Reading phone apps…" },
   };
   const s = map[status] || map.loading;
   return (
@@ -47,8 +39,30 @@ function StatusPill({ status }) {
       background: `${s.color}18`, border: `1px solid ${s.color}55`,
       borderRadius: 20, padding: "5px 14px",
       fontSize: 12, color: s.color, fontWeight: 600, transition: "all 0.3s",
+    }}>{s.text}</div>
+  );
+}
+
+// ── Tamper Alert Banner ───────────────────────────────────────────
+function TamperBanner({ alert, onDismiss }) {
+  if (!alert) return null;
+  return (
+    <div style={{
+      background: "rgba(239,68,68,0.15)", borderBottom: "1px solid rgba(239,68,68,0.4)",
+      padding: "12px 28px", display: "flex", alignItems: "center", gap: 12,
     }}>
-      {s.text}
+      <span style={{ fontSize: 20 }}>🚨</span>
+      <div style={{ flex: 1 }}>
+        <span style={{ color: "#f87171", fontWeight: 700, fontSize: 13 }}>TAMPER ALERT: </span>
+        <span style={{ color: "rgba(255,255,255,0.8)", fontSize: 13 }}>{alert.message}</span>
+        <span style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, marginLeft: 10 }}>
+          {alert.timestamp ? new Date(alert.timestamp).toLocaleString() : ""}
+        </span>
+      </div>
+      <button onClick={onDismiss} style={{
+        background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.4)",
+        color: "#f87171", borderRadius: 8, padding: "4px 12px", cursor: "pointer", fontSize: 12,
+      }}>Dismiss</button>
     </div>
   );
 }
@@ -79,30 +93,64 @@ const timeInputStyle = {
 
 // ── Main App ─────────────────────────────────────────────────────
 export default function AppScheduler() {
-  const [apps, setApps]           = useState(DEFAULT_APPS);
-  const [schedules, setSchedules] = useState({});
-  const [selected, setSelected]   = useState(null);
-  const [fbStatus, setFbStatus]   = useState("loading");
-  const [customApp, setCustomApp] = useState("");
+  const [apps, setApps]               = useState([]);
+  const [schedules, setSchedules]     = useState({});
+  const [selected, setSelected]       = useState(null);
+  const [fbStatus, setFbStatus]       = useState("loading");
+  const [search, setSearch]           = useState("");
+  const [tamperAlert, setTamperAlert] = useState(null);
+  const [deviceInfo, setDeviceInfo]   = useState(null);
+  const [lastSeen, setLastSeen]       = useState(null);
 
-  // Load from Firestore + real-time listener
+  // ── Load everything from Firebase ────────────────────────────
   useEffect(() => {
-    const rulesRef = doc(db, "guardianshield", "rules");
-    const appsRef  = doc(db, "guardianshield", "apps");
+    // 1. Real-time rules listener
+    const unsubRules = onSnapshot(
+      doc(db, "guardianshield", "rules"),
+      (snap) => {
+        if (snap.exists()) setSchedules(snap.data() || {});
+        setFbStatus("connected");
+      },
+      () => setFbStatus("error")
+    );
 
-    const unsubRules = onSnapshot(rulesRef, (snap) => {
-      if (snap.exists()) setSchedules(snap.data());
-      setFbStatus("connected");
-    }, () => setFbStatus("error"));
+    // 2. Real-time installed apps listener (from her phone)
+    const unsubApps = onSnapshot(
+      doc(db, "guardianshield", "installed_apps"),
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data.list && data.list.length > 0) {
+            setApps(data.list);
+            setDeviceInfo(data.deviceId || null);
+            setLastSeen(data.updatedAt || null);
+            setFbStatus("connected");
+          }
+        }
+      }
+    );
 
-    getDoc(appsRef).then((snap) => {
-      if (snap.exists() && snap.data().list) setApps(snap.data().list);
-    });
+    // 3. Tamper alert listener
+    const unsubTamper = onSnapshot(
+      doc(db, "guardianshield", "tamper_alert"),
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data && !data.resolved) setTamperAlert(data);
+        }
+      }
+    );
 
-    return () => unsubRules();
+    return () => { unsubRules(); unsubApps(); unsubTamper(); };
   }, []);
 
-  // Save schedules
+  // ── Dismiss tamper alert ──────────────────────────────────────
+  const dismissTamper = async () => {
+    await setDoc(doc(db, "guardianshield", "tamper_alert"), { resolved: true }, { merge: true });
+    setTamperAlert(null);
+  };
+
+  // ── Save schedules ────────────────────────────────────────────
   const saveToFirebase = async (newSchedules) => {
     setFbStatus("saving");
     try {
@@ -110,26 +158,16 @@ export default function AppScheduler() {
       setFbStatus("saved");
       setTimeout(() => setFbStatus("connected"), 2000);
     } catch (e) {
-      console.error(e);
       setFbStatus("error");
-    }
-  };
-
-  // Save apps list
-  const saveAppsToFirebase = async (newApps) => {
-    try {
-      await setDoc(doc(db, "guardianshield", "apps"), { list: newApps });
-    } catch (e) {
-      console.error(e);
     }
   };
 
   const getSchedule = (id) => schedules[id] || defaultSchedule();
 
   const updateSchedule = (id, updates) => {
-    const newSchedules = { ...schedules, [id]: { ...getSchedule(id), ...updates } };
-    setSchedules(newSchedules);
-    saveToFirebase(newSchedules);
+    const n = { ...schedules, [id]: { ...getSchedule(id), ...updates } };
+    setSchedules(n);
+    saveToFirebase(n);
   };
 
   const toggleDay = (id, day) => {
@@ -145,29 +183,13 @@ export default function AppScheduler() {
     updateSchedule(id, { slots });
   };
 
-  const addSlot = (id) => {
-    updateSchedule(id, { slots: [...getSchedule(id).slots, { from: "09:00", to: "11:00" }] });
-  };
+  const addSlot    = (id) => updateSchedule(id, { slots: [...getSchedule(id).slots, { from: "09:00", to: "11:00" }] });
+  const removeSlot = (id, idx) => updateSchedule(id, { slots: getSchedule(id).slots.filter((_, i) => i !== idx) });
 
-  const removeSlot = (id, idx) => {
-    updateSchedule(id, { slots: getSchedule(id).slots.filter((_, i) => i !== idx) });
-  };
+  const activeCount  = Object.values(schedules).filter((s) => s.enabled).length;
+  const filteredApps = apps.filter(a => a.name?.toLowerCase().includes(search.toLowerCase()));
 
-  const addCustomApp = () => {
-    if (!customApp.trim()) return;
-    const newApp = {
-      id: customApp.toLowerCase().replace(/\s+/g, "_") + "_" + Date.now(),
-      name: customApp, icon: "📱", color: "#7C3AED",
-    };
-    const newApps = [...apps, newApp];
-    setApps(newApps);
-    saveAppsToFirebase(newApps);
-    setCustomApp("");
-    setSelected(newApp.id);
-  };
-
-  const activeCount = Object.values(schedules).filter((s) => s.enabled).length;
-
+  // ── Render ────────────────────────────────────────────────────
   return (
     <div style={{
       minHeight: "100vh",
@@ -178,15 +200,23 @@ export default function AppScheduler() {
       <div style={{
         background: "rgba(255,255,255,0.05)", backdropFilter: "blur(20px)",
         borderBottom: "1px solid rgba(255,255,255,0.1)",
-        padding: "18px 28px", display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "16px 28px", display: "flex", alignItems: "center", justifyContent: "space-between",
+        flexWrap: "wrap", gap: 10,
       }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 700 }}>🛡️ AppGuard Control Panel</div>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginTop: 2 }}>
-            Schedule app access • Changes sync to her phone instantly
+            {deviceInfo
+              ? `📱 Connected: ${deviceInfo} • ${apps.length} apps loaded`
+              : "Waiting for phone to connect…"}
+            {lastSeen && (
+              <span style={{ marginLeft: 8, color: "rgba(255,255,255,0.3)" }}>
+                • Last seen: {new Date(lastSeen).toLocaleTimeString()}
+              </span>
+            )}
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <StatusPill status={fbStatus} />
           <div style={{
             background: activeCount > 0 ? "rgba(74,222,128,0.15)" : "rgba(255,255,255,0.08)",
@@ -199,33 +229,66 @@ export default function AppScheduler() {
         </div>
       </div>
 
+      {/* Tamper Alert */}
+      <TamperBanner alert={tamperAlert} onDismiss={dismissTamper} />
+
       <div style={{ display: "flex", height: "calc(100vh - 69px)" }}>
         {/* Sidebar */}
         <div style={{
-          width: 255, borderRight: "1px solid rgba(255,255,255,0.08)",
-          padding: "18px 10px", overflowY: "auto", flexShrink: 0,
+          width: 270, borderRight: "1px solid rgba(255,255,255,0.08)",
+          padding: "14px 10px", overflowY: "auto", flexShrink: 0,
+          display: "flex", flexDirection: "column", gap: 0,
         }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", letterSpacing: 1.5, marginBottom: 10, paddingLeft: 8 }}>
-            APPS TO MANAGE
+          {/* Search */}
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="🔍 Search apps…"
+            style={{
+              width: "100%", background: "rgba(255,255,255,0.07)",
+              border: "1px solid rgba(255,255,255,0.15)", borderRadius: 10,
+              padding: "9px 12px", color: "#fff", fontSize: 13, outline: "none",
+              boxSizing: "border-box", marginBottom: 12,
+            }}
+          />
+
+          {/* App count */}
+          <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", letterSpacing: 1.5, marginBottom: 8, paddingLeft: 4 }}>
+            {apps.length === 0
+              ? "WAITING FOR PHONE…"
+              : `${filteredApps.length} OF ${apps.length} APPS`}
           </div>
 
-          {apps.map((app) => {
+          {/* Empty state */}
+          {apps.length === 0 && (
+            <div style={{
+              textAlign: "center", padding: "40px 16px",
+              color: "rgba(255,255,255,0.3)", fontSize: 13,
+            }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>📱</div>
+              Install the APK on her phone first.<br/><br/>
+              Her apps will appear here automatically!
+            </div>
+          )}
+
+          {/* App list */}
+          {filteredApps.map((app) => {
             const sch = getSchedule(app.id);
             return (
               <div key={app.id} onClick={() => setSelected(app.id)} style={{
                 display: "flex", alignItems: "center", gap: 10,
-                padding: "10px 10px", borderRadius: 12, cursor: "pointer", marginBottom: 3,
+                padding: "9px 10px", borderRadius: 11, cursor: "pointer", marginBottom: 2,
                 background: selected === app.id ? "rgba(124,58,237,0.25)" : "transparent",
                 border: `1px solid ${selected === app.id ? "rgba(124,58,237,0.5)" : "transparent"}`,
                 transition: "all 0.15s",
               }}>
                 <div style={{
-                  width: 34, height: 34, borderRadius: 9,
-                  background: `${app.color}22`, border: `1px solid ${app.color}44`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 16, flexShrink: 0,
+                  width: 34, height: 34, borderRadius: 9, flexShrink: 0,
+                  background: `${app.color || "#7C3AED"}22`,
+                  border: `1px solid ${app.color || "#7C3AED"}44`,
+                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16,
                 }}>
-                  {app.icon}
+                  {app.icon || "📱"}
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -235,7 +298,7 @@ export default function AppScheduler() {
                     {sch.enabled ? `✓ ${sch.slots.length} slot${sch.slots.length > 1 ? "s" : ""} active` : "No restriction"}
                   </div>
                 </div>
-                {/* Toggle switch */}
+                {/* Toggle */}
                 <div
                   onClick={(e) => { e.stopPropagation(); updateSchedule(app.id, { enabled: !sch.enabled }); }}
                   style={{
@@ -253,32 +316,6 @@ export default function AppScheduler() {
               </div>
             );
           })}
-
-          {/* Add custom app */}
-          <div style={{ padding: "10px 8px", marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.07)" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", letterSpacing: 1.5, marginBottom: 8 }}>
-              ADD CUSTOM APP
-            </div>
-            <input
-              value={customApp}
-              onChange={(e) => setCustomApp(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addCustomApp()}
-              placeholder="e.g. Clash of Clans"
-              style={{
-                width: "100%", background: "rgba(255,255,255,0.07)",
-                border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8,
-                padding: "7px 10px", color: "#fff", fontSize: 12, outline: "none",
-                boxSizing: "border-box",
-              }}
-            />
-            <button onClick={addCustomApp} style={{
-              width: "100%", marginTop: 6, background: "rgba(124,58,237,0.3)",
-              border: "1px solid rgba(124,58,237,0.5)", borderRadius: 8,
-              padding: "6px", color: "#a78bfa", fontSize: 12, cursor: "pointer",
-            }}>
-              + Add App
-            </button>
-          </div>
         </div>
 
         {/* Schedule Editor */}
@@ -288,31 +325,41 @@ export default function AppScheduler() {
               display: "flex", flexDirection: "column", alignItems: "center",
               justifyContent: "center", height: "100%", opacity: 0.35,
             }}>
-              <div style={{ fontSize: 56 }}>📅</div>
-              <div style={{ fontSize: 17, marginTop: 14 }}>Select an app to configure its schedule</div>
+              <div style={{ fontSize: 56 }}>{apps.length === 0 ? "📱" : "📅"}</div>
+              <div style={{ fontSize: 17, marginTop: 14 }}>
+                {apps.length === 0
+                  ? "Install APK on her phone first"
+                  : "Select an app to set its schedule"}
+              </div>
               <div style={{ fontSize: 13, marginTop: 6, color: "rgba(255,255,255,0.5)" }}>
-                Rules save to Firebase instantly
+                {apps.length === 0
+                  ? "Her installed apps will appear in the sidebar automatically"
+                  : `${apps.length} apps loaded from her phone`}
               </div>
             </div>
           ) : (() => {
             const app = apps.find((a) => a.id === selected);
             if (!app) return null;
             const sch = getSchedule(selected);
+            const color = app.color || "#7C3AED";
             return (
               <div>
                 {/* App header */}
                 <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 28 }}>
                   <div style={{
                     width: 50, height: 50, borderRadius: 14,
-                    background: `${app.color}22`, border: `2px solid ${app.color}66`,
+                    background: `${color}22`, border: `2px solid ${color}66`,
                     display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24,
                   }}>
-                    {app.icon}
+                    {app.icon || "📱"}
                   </div>
                   <div>
                     <div style={{ fontSize: 20, fontWeight: 700 }}>{app.name}</div>
-                    <div style={{ fontSize: 13, color: sch.enabled ? "#4ade80" : "rgba(255,255,255,0.4)", marginTop: 2 }}>
-                      {sch.enabled ? "✓ Restriction active — synced to her phone" : "⚪ No restriction — app freely accessible"}
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginTop: 2, fontFamily: "monospace" }}>
+                      {app.packageName}
+                    </div>
+                    <div style={{ fontSize: 12, color: sch.enabled ? "#4ade80" : "rgba(255,255,255,0.4)", marginTop: 3 }}>
+                      {sch.enabled ? "✓ Restriction active" : "⚪ No restriction"}
                     </div>
                   </div>
                   <button
@@ -338,18 +385,16 @@ export default function AppScheduler() {
                       return (
                         <div key={day} onClick={() => toggleDay(selected, day)} style={{
                           padding: "8px 16px", borderRadius: 10, cursor: "pointer",
-                          background: active ? `${app.color}33` : "rgba(255,255,255,0.06)",
-                          border: `1px solid ${active ? app.color + "88" : "rgba(255,255,255,0.1)"}`,
+                          background: active ? `${color}33` : "rgba(255,255,255,0.06)",
+                          border: `1px solid ${active ? color + "88" : "rgba(255,255,255,0.1)"}`,
                           color: active ? "#fff" : "rgba(255,255,255,0.35)",
                           fontWeight: active ? 600 : 400, fontSize: 14, transition: "all 0.15s",
-                        }}>
-                          {day}
-                        </div>
+                        }}>{day}</div>
                       );
                     })}
                   </div>
                   <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginTop: 10 }}>
-                    Tap a day to toggle. App is accessible only on highlighted days.
+                    Tap a day to toggle. App accessible only on highlighted days.
                   </div>
                 </Section>
 
@@ -358,9 +403,7 @@ export default function AppScheduler() {
                   <button onClick={() => addSlot(selected)} style={{
                     background: "rgba(124,58,237,0.25)", border: "1px solid rgba(124,58,237,0.4)",
                     color: "#a78bfa", borderRadius: 8, padding: "5px 12px", fontSize: 12, cursor: "pointer",
-                  }}>
-                    + Add Slot
-                  </button>
+                  }}>+ Add Slot</button>
                 }>
                   {sch.slots.map((slot, idx) => (
                     <div key={idx} style={{
@@ -382,9 +425,7 @@ export default function AppScheduler() {
                         marginLeft: "auto", background: "rgba(74,222,128,0.1)",
                         border: "1px solid rgba(74,222,128,0.25)",
                         borderRadius: 8, padding: "4px 12px", fontSize: 12, color: "#4ade80",
-                      }}>
-                        {slot.from} – {slot.to}
-                      </div>
+                      }}>{slot.from} – {slot.to}</div>
                       {sch.slots.length > 1 && (
                         <button onClick={() => removeSlot(selected, idx)} style={{
                           background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.3)",
@@ -399,23 +440,19 @@ export default function AppScheduler() {
                     border: "1px solid rgba(124,58,237,0.2)",
                     fontSize: 12, color: "rgba(255,255,255,0.5)",
                   }}>
-                    💡 Outside these slots, the app will be <strong style={{ color: "#f87171" }}>blocked</strong> on her phone automatically.
+                    💡 Outside these slots, <strong style={{ color: "#f87171" }}>app is blocked</strong> on her phone automatically.
                   </div>
                 </Section>
 
-                {/* Firebase sync note */}
+                {/* Sync note */}
                 <div style={{
-                  marginTop: 20, padding: "14px 18px",
-                  background: "rgba(255,255,255,0.03)", borderRadius: 12,
+                  padding: "12px 16px", background: "rgba(255,255,255,0.03)", borderRadius: 12,
                   border: "1px solid rgba(255,255,255,0.07)",
                   fontSize: 12, color: "rgba(255,255,255,0.35)",
                   display: "flex", alignItems: "center", gap: 10,
                 }}>
-                  <span style={{ fontSize: 18 }}>🔥</span>
-                  <span>
-                    All changes save to <strong style={{ color: "rgba(255,255,255,0.6)" }}>Firebase Firestore</strong> in real-time.
-                    The Android agent app on her phone reads these rules every 30 seconds.
-                  </span>
+                  <span style={{ fontSize: 16 }}>🔥</span>
+                  Changes save to Firebase instantly and sync to her phone within 30 seconds.
                 </div>
               </div>
             );
